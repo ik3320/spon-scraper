@@ -39,7 +39,7 @@ if not GAS_WEB_APP_URL:
     logger.error("[오류] 구글 웹 앱 URL(GAS_WEB_APP_URL)이 환경변수로 세팅되지 않았습니다.")
     sys.exit(1)
 
-PAGE_DELAY = 0.3
+PAGE_DELAY = 0.5
 STREAMER_DELAY = 3.0
 BATCH_SIZE = 10  # 10명씩 묶어서 전송
 

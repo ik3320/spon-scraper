@@ -5,17 +5,43 @@ import json
 import time
 import os
 import sys
+import logging
+import traceback
 from datetime import datetime, timedelta
 
-# GitHub Actions Secrets 환경변수 불러오기
+# ==========================================
+# 1. 로깅(Logging) 설정
+# ==========================================
+timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+log_filename = f"sync_{timestamp_str}.log"
+length_txt_filename = f"json_lengths_{timestamp_str}.txt"
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+formatter = logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
+file_handler = logging.FileHandler(log_filename, encoding='utf-8')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
+
+
+# ==========================================
+# 2. GitHub Actions Secrets 환경변수 불러오기
+# ==========================================
 GAS_WEB_APP_URL = os.environ.get("GAS_WEB_APP_URL")
 
 if not GAS_WEB_APP_URL:
-    print("[오류] 구글 웹 앱 URL(GAS_WEB_APP_URL)이 환경변수로 세팅되지 않았습니다.")
+    logger.error("[오류] 구글 웹 앱 URL(GAS_WEB_APP_URL)이 환경변수로 세팅되지 않았습니다.")
     sys.exit(1)
 
 PAGE_DELAY = 0.3
 STREAMER_DELAY = 3.0
+BATCH_SIZE = 10  # 10명씩 묶어서 전송
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -43,6 +69,7 @@ def fetch_all_matches(elo_id):
         try:
             res = session.get(url, headers=HEADERS, timeout=10)
             if res.status_code != 200:
+                logger.warning(f"[API 경고] ELO_ID {elo_id} - 응답 코드: {res.status_code}")
                 break
             
             data = res.json()
@@ -51,11 +78,10 @@ def fetch_all_matches(elo_id):
                 
             matches.extend(data)
             offset += limit
-            
             time.sleep(PAGE_DELAY)
             
         except Exception as e:
-            print(f"[Error] API Fetch failed for ELO_ID {elo_id}: {e}")
+            logger.error(f"[API 오류] ELO_ID {elo_id} 데이터 수집 중 예외 발생: {e}")
             break
             
     return matches
@@ -138,13 +164,10 @@ def process_spon_data(elo_id, matches):
                 if is_win: c_total["종족별"][opp_race]["승"] += 1
                 else: c_total["종족별"][opp_race]["패"] += 1
 
-            # --- [팀 정보 분기 처리] ---
-            # 대회(college_event), 대학대전(college_war), 미니대전(college_mini)만 팀명 수집
             if cat in ["college_event", "college_war", "college_mini"]:
                 my_team_val = (my_p.get('team_name') or '').strip()
                 opp_team_val = (opp_p.get('team_name') or '').strip()
             else:
-                # 팀리그(team_event), 프로리그(pro_league), 개인전(solo_event) 등은 빈 값 처리
                 my_team_val = ""
                 opp_team_val = ""
 
@@ -179,9 +202,9 @@ def process_spon_data(elo_id, matches):
         "college_event": json.dumps(cat_data["college_event"], ensure_ascii=False),
         "college_war": json.dumps(cat_data["college_war"], ensure_ascii=False),
         "college_mini": json.dumps(cat_data["college_mini"], ensure_ascii=False),
-        "team_event": json.dumps(cat_data["team_event"], ensure_ascii=False),
-        "pro_league": json.dumps(cat_data["pro_league"], ensure_ascii=False),
-        "solo_event": json.dumps(cat_data["solo_event"], ensure_ascii=False),
+        "team_event": json.dumps({"total": cat_data["team_event"]["total"]}, ensure_ascii=False),
+        "pro_league": json.dumps({"total": cat_data["pro_league"]["total"]}, ensure_ascii=False),
+        "solo_event": json.dumps({"total": cat_data["solo_event"]["total"]}, ensure_ascii=False),
     }
 
 def process_opponent_db(elo_id, streamer_name, matches):
@@ -260,54 +283,113 @@ def process_opponent_db(elo_id, streamer_name, matches):
 
     return rows
 
+def flush_batch(spon_batch, opp_batch):
+    """배치로 묶인 데이터를 GAS로 전송"""
+    if spon_batch:
+        try:
+            res_spon = requests.post(GAS_WEB_APP_URL, json={
+                "action": "updateSponDBData",
+                "payload": spon_batch
+            }, headers=HEADERS, timeout=60)
+            logger.info(f"[배치 전송] 스폰 DB ({len(spon_batch)}명) 업데이트 결과: {res_spon.text}")
+        except Exception as e:
+            logger.error(f"[배치 오류] 스폰 DB 전송 중 에러 발생: {e}")
+
+    if opp_batch:
+        try:
+            res_opp = requests.post(GAS_WEB_APP_URL, json={
+                "action": "updateOpponentDBData",
+                "payload": opp_batch
+            }, headers=HEADERS, timeout=60)
+            logger.info(f"[배치 전송] 상대전적 DB ({len(opp_batch)}건) 업데이트 결과: {res_opp.text}")
+        except Exception as e:
+            logger.error(f"[배치 오류] 상대전적 DB 전송 중 에러 발생: {e}")
+
 def run_sync():
-    # URL 파라미터 전달 방식 개선
+    logger.info("=== GitHub Actions 동기화 작업을 시작합니다 ===")
     params = {"action": "getSponDBTargets", "targetCol": "활성"}
     
     try:
         res = requests.get(GAS_WEB_APP_URL, params=params, headers=HEADERS, timeout=15)
         targets = res.json()
     except Exception as e:
-        print(f"[오류] 대상 스트리머 목록을 가져오지 못했습니다: {e}")
+        logger.error(f"[초기화 실패] 대상 스트리머 목록을 가져오지 못했습니다: {e}")
         return
 
     if isinstance(targets, dict) and "error" in targets:
-        print(f"[오류 발생] {targets['error']}")
+        logger.error(f"[GAS 응답 오류] {targets['error']}")
         return
-        
-    spon_payload = []
-    all_opponent_rows = []
-    print(f"[활성 모드] 총 {len(targets)}명의 대상 스트리머 데이터를 수집합니다.")
 
-    for t in targets:
-        elo_id = t['eloId']
-        streamer_name = t['streamerName']
-        print(f"[{streamer_name}] (ELO_ID: {elo_id}) 수집 중...")
-        matches = fetch_all_matches(elo_id)
-        
-        processed = process_spon_data(elo_id, matches)
-        if processed:
-            processed['rowNum'] = t['rowNum']
-            spon_payload.append(processed)
+    total_count = len(targets)
+    logger.info(f"[활성 모드] 총 {total_count}명의 대상 스트리머 데이터를 수집합니다 (배치 크기: {BATCH_SIZE}).")
 
-        opp_rows = process_opponent_db(elo_id, streamer_name, matches)
-        all_opponent_rows.extend(opp_rows)
+    error_streamers = []
+    spon_batch = []
+    opp_batch = []
+
+    with open(length_txt_filename, "w", encoding="utf-8") as txt_f:
+        txt_f.write("=== 스트리머별 주요 JSON 글자수 기록 ===\n\n")
+
+    for idx, t in enumerate(targets, start=1):
+        elo_id = t.get('eloId')
+        streamer_name = t.get('streamerName', 'Unknown')
+        
+        logger.info(f"[{idx}/{total_count}] [{streamer_name}] (ELO_ID: {elo_id}) 수집 시작...")
+
+        try:
+            matches = fetch_all_matches(elo_id)
+            
+            # 1. 스폰 DB 처리 및 배치 추가
+            processed = process_spon_data(elo_id, matches)
+            if processed:
+                processed['rowNum'] = t['rowNum']
+
+                len_spon = len(processed['sponJson'])
+                len_event = len(processed['college_event'])
+                len_war = len(processed['college_war'])
+                len_mini = len(processed['college_mini'])
+
+                log_msg = f"[{streamer_name}] JSON 글자수 -> 스폰: {len_spon}자 | 대회: {len_event}자 | 대학대전: {len_war}자 | 미니대전: {len_mini}자"
+                logger.info(log_msg)
+
+                with open(length_txt_filename, "a", encoding="utf-8") as txt_f:
+                    txt_f.write(f"[{idx}/{total_count}] {log_msg}\n")
+
+                spon_batch.append(processed)
+
+            # 2. 상대전적 DB 처리 및 배치 추가
+            opp_rows = process_opponent_db(elo_id, streamer_name, matches)
+            if opp_rows:
+                opp_batch.extend(opp_rows)
+
+            logger.info(f"[{idx}/{total_count}] [{streamer_name}] 완료 (경기 수: {len(matches)}건)")
+
+        except Exception as e:
+            logger.error(f"[{idx}/{total_count}] [{streamer_name}] (ELO_ID: {elo_id}) 처리 중 에러 발생!")
+            logger.error(f"상세 에러 내용: {e}")
+            logger.debug(traceback.format_exc())
+            error_streamers.append({'name': streamer_name, 'elo_id': elo_id, 'error': str(e)})
+
+        # 배치 크기 도달 시 전송
+        if len(spon_batch) >= BATCH_SIZE:
+            flush_batch(spon_batch, opp_batch)
+            spon_batch = []
+            opp_batch = []
 
         time.sleep(STREAMER_DELAY)
 
-    if spon_payload:
-        update_res = requests.post(GAS_WEB_APP_URL, json={
-            "action": "updateSponDBData",
-            "payload": spon_payload
-        }, headers=HEADERS)
-        print("스폰 DB 업데이트 결과:", update_res.text)
+    # 잔여 데이터 전송
+    if spon_batch or opp_batch:
+        flush_batch(spon_batch, opp_batch)
 
-    if all_opponent_rows:
-        opp_res = requests.post(GAS_WEB_APP_URL, json={
-            "action": "updateOpponentDBData",
-            "payload": all_opponent_rows
-        }, headers=HEADERS)
-        print("상대전적 DB 업데이트 결과:", opp_res.text)
+    if error_streamers:
+        logger.warning("==========================================")
+        logger.warning(f"총 {len(error_streamers)}명의 스트리머 처리 중 오류가 발생했습니다:")
+        for err_info in error_streamers:
+            logger.warning(f" - 이름: {err_info['name']} (ELO_ID: {err_info['elo_id']}) | 사유: {err_info['error']}")
+        logger.warning("==========================================")
+    else:
+        logger.info("모든 스트리머의 데이터가 오류 없이 성공적으로 완료되었습니다.")
 
 if __name__ == "__main__":
     run_sync()

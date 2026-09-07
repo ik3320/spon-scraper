@@ -15,7 +15,7 @@ if not GAS_WEB_APP_URL:
     sys.exit(1)
 
 PAGE_DELAY = 0.3
-STREAMER_DELAY = 1.0
+STREAMER_DELAY = 3.0
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"

@@ -138,12 +138,23 @@ def process_spon_data(elo_id, matches):
                 if is_win: c_total["종족별"][opp_race]["승"] += 1
                 else: c_total["종족별"][opp_race]["패"] += 1
 
+            # --- [팀 정보 분기 처리] ---
+            # 대회(college_event), 대학대전(college_war), 미니대전(college_mini)만 팀명 수집
+            if cat in ["college_event", "college_war", "college_mini"]:
+                my_team_val = (my_p.get('team_name') or '').strip()
+                opp_team_val = (opp_p.get('team_name') or '').strip()
+            else:
+                # 팀리그(team_event), 프로리그(pro_league), 개인전(solo_event) 등은 빈 값 처리
+                my_team_val = ""
+                opp_team_val = ""
+
             cat_data[cat]["matches"].append({
                 "date": played_on,
                 "result": "승" if is_win else "패",
                 "opponent": opp_p.get('name', ''),
                 "race": opp_race,
-                "team": "",
+                "my_team": my_team_val,
+                "opp_team": opp_team_val,
                 "matchName": m.get('memo') or m.get('event_name', ''),
                 "eventName": m.get('event_name', '')
             })

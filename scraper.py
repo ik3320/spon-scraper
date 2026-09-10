@@ -90,10 +90,15 @@ def process_spon_data(elo_id, matches):
     if not matches:
         return None
 
-    matches.sort(key=lambda x: x.get('played_on', ''))
+    # played_on 유효한 데이터만 추출 후 정렬
+    valid_matches = [m for m in matches if m.get('played_on')]
+    if not valid_matches:
+        return None
 
-    first_date = matches[0].get('played_on')
-    last_date = matches[-1].get('played_on')
+    valid_matches.sort(key=lambda x: x['played_on'])
+
+    first_date = valid_matches[0]['played_on']
+    last_date = valid_matches[-1]['played_on']
 
     today = datetime.now()
     cutoff_date_90 = (today - timedelta(days=90)).strftime('%Y-%m-%d')

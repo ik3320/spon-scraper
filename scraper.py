@@ -314,12 +314,24 @@ def run_sync():
     logger.info("=== GitHub Actions 동기화 작업을 시작합니다 ===")
     params = {"action": "getSponDBTargets", "targetCol": "활성"}
     
-    try:
-        res = requests.get(GAS_WEB_APP_URL, params=params, headers=HEADERS, timeout=15)
-        targets = res.json()
-    except Exception as e:
-        logger.error(f"[초기화 실패] 대상 스트리머 목록을 가져오지 못했습니다: {e}")
-        return
+	# 초기 대상 목록 수집 시 세션(Retry 적용) 사용 및 타임아웃 60초로 연장
+    max_retries = 3
+    targets = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(f"대상 스트리머 목록 요청 중... (시도 {attempt}/{max_retries})")
+            # 15초 -> 60초로 타임아웃 연장 및 Retry 적용된 session 사용
+            res = session.get(GAS_WEB_APP_URL, params=params, headers=HEADERS, timeout=60)
+            targets = res.json()
+            break  # 성공 시 루프 탈출
+        except Exception as e:
+            logger.warning(f"[초기화 시도 {attempt} 실패] {e}")
+            if attempt < max_retries:
+                time.sleep(5)  # 재시도 전 5초 대기
+            else:
+                logger.error(f"[초기화 최종 실패] {max_retries}회 시도 후에도 대상 목록을 가져오지 못했습니다.")
+                return
 
     if isinstance(targets, dict) and "error" in targets:
         logger.error(f"[GAS 응답 오류] {targets['error']}")
